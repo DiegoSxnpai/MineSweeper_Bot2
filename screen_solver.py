@@ -289,7 +289,7 @@ class ScreenMinesweeperSolver:
 
         for contour in contours:
             area = cv2.contourArea(contour)
-            if area > 5000:  # Large enough to be a game grid
+            if area > 8000:  # Large enough to be a game grid
                 perimeter = cv2.arcLength(contour, True)
                 approx = cv2.approxPolyDP(contour, 0.02 * perimeter, True)
 
@@ -297,8 +297,8 @@ class ScreenMinesweeperSolver:
                     x, y, w, h = cv2.boundingRect(contour)
                     aspect_ratio = w / h
 
-                    # Look for square-ish rectangles
-                    if 0.7 < aspect_ratio < 1.4:
+                    # Look for square-ish rectangles (Minesweeper grids are usually square-ish)
+                    if 0.8 < aspect_ratio < 1.3:
                         # Check if this region has grid patterns
                         if self._has_grid_pattern(gray[y:y+h, x:x+w]):
                             if area > max_area:
@@ -325,11 +325,78 @@ class ScreenMinesweeperSolver:
                     print(f"Detected grid: {cols}x{rows}, cell size: {cell_size}px")
                     return cols, rows
 
+        # If no good contour found, try to detect the grid area by looking for the actual game board
+        # Minesweeper usually has a distinct border around the grid
+        height, width = gray.shape
+
+        # Look for the grid by scanning for horizontal and vertical lines
+        # This is a more targeted approach for Minesweeper
+        grid_x, grid_y, grid_w, grid_h = self._find_grid_bounds(gray)
+
+        if grid_w > 0 and grid_h > 0:
+            print(f"Found grid bounds: {grid_x}, {grid_y}, {grid_w}, {grid_h}")
+
+            # Estimate cell size based on typical Minesweeper proportions
+            # Try different cell sizes to find the best fit
+            best_fit = None
+            best_score = 0
+
+            for cell_size in range(18, 35, 2):  # Test common cell sizes
+                cols = grid_w // cell_size
+                rows = grid_h // cell_size
+
+                if 8 <= cols <= 30 and 8 <= rows <= 24:
+                    # Calculate how well this fits
+                    score = cols * rows  # Prefer grids with more cells
+                    if score > best_score:
+                        best_score = score
+                        best_fit = (cell_size, cols, rows)
+
+            if best_fit:
+                cell_size, cols, rows = best_fit
+                self.cell_size = cell_size
+                self.grid_offset = (grid_x, grid_y)
+
+                print(f"Detected grid: {cols}x{rows}, cell size: {cell_size}px")
+                return cols, rows
+
         # Last resort: assume standard Minesweeper sizes
         print("Using default 16x16 grid")
         self.cell_size = 20
         self.grid_offset = (0, 0)
         return 16, 16
+
+    def _find_grid_bounds(self, gray: np.ndarray) -> Tuple[int, int, int, int]:
+        """Find the actual grid bounds by looking for the game board area."""
+        height, width = gray.shape
+
+        # Look for horizontal grid lines (dark lines separating rows)
+        horizontal_lines = []
+        for y in range(50, height - 50, 5):  # Skip borders
+            row = gray[y, :]
+            # Look for lines with high contrast (indicating grid separators)
+            contrast = np.std(row)
+            if contrast > 30:  # High contrast indicates a line
+                horizontal_lines.append(y)
+
+        # Look for vertical grid lines
+        vertical_lines = []
+        for x in range(50, width - 50, 5):  # Skip borders
+            col = gray[:, x]
+            contrast = np.std(col)
+            if contrast > 30:  # High contrast indicates a line
+                vertical_lines.append(x)
+
+        if len(horizontal_lines) >= 4 and len(vertical_lines) >= 4:
+            # Find the bounding box of the grid lines
+            grid_x = min(vertical_lines)
+            grid_y = min(horizontal_lines)
+            grid_w = max(vertical_lines) - grid_x
+            grid_h = max(horizontal_lines) - grid_y
+
+            return grid_x, grid_y, grid_w, grid_h
+
+        return 0, 0, 0, 0
 
     def _detect_cell_size(self, region: np.ndarray) -> int:
         """Detect cell size from grid pattern analysis."""
@@ -473,11 +540,12 @@ class ScreenMinesweeperSolver:
         try:
             gray = cv2.cvtColor(cell_image, cv2.COLOR_BGR2GRAY)
 
-            # Try multiple preprocessing approaches
+            # Try multiple preprocessing approaches for better OCR
             preprocessings = [
-                lambda img: cv2.convertScaleAbs(img, alpha=1.8, beta=20),  # High contrast
+                lambda img: cv2.convertScaleAbs(img, alpha=2.0, beta=30),  # High contrast, bright
                 lambda img: cv2.adaptiveThreshold(img, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2),
-                lambda img: cv2.convertScaleAbs(img, alpha=2.0, beta=0),   # Maximum contrast
+                lambda img: cv2.convertScaleAbs(img, alpha=1.5, beta=0),   # Medium contrast
+                lambda img: cv2.convertScaleAbs(img, alpha=3.0, beta=0),   # Maximum contrast
                 lambda img: img,  # Raw image as fallback
             ]
 
@@ -486,6 +554,8 @@ class ScreenMinesweeperSolver:
             for preprocessing in preprocessings:
                 try:
                     processed = preprocessing(gray)
+
+                    # Try different OCR configurations
                     results = self.reader.readtext(processed)
 
                     if results:
@@ -497,9 +567,13 @@ class ScreenMinesweeperSolver:
                             text = text.strip()
                             if len(text) == 1 and text.isdigit():
                                 number = int(text)
-                                if 1 <= number <= 8:
+                                if 1 <= number <= 8:  # Valid Minesweeper numbers
                                     if confidence > best_result[1]:
                                         best_result = (number, confidence)
+                            # Also try for empty cells (no text)
+                            elif len(text) == 0 and confidence > 0.8:
+                                # This might be an empty revealed cell
+                                best_result = (0, confidence)
 
                 except Exception:
                     continue
@@ -607,9 +681,11 @@ class ScreenMinesweeperSolver:
         # Check if game has started (has revealed cells)
         revealed_count = sum(1 for row in game_state['board'] for cell in row if cell['type'] in ['revealed', 'empty'])
 
+        print(f"Game state check: {revealed_count} revealed cells found")
+
         if revealed_count == 0:
             print("Game hasn't started yet. Making first move...")
-            # Make a safe first move (typically center or corner)
+            # Make a safe first move (try center first, then edges)
             first_move = self._make_first_move(width, height)
             if first_move:
                 x, y = first_move
@@ -618,6 +694,26 @@ class ScreenMinesweeperSolver:
                     time.sleep(delay * 2)  # Wait longer for first move
                     # Update game state
                     game_state = self.get_game_state()
+
+                    # Check if the move revealed anything
+                    new_revealed_count = sum(1 for row in game_state['board'] for cell in row if cell['type'] in ['revealed', 'empty'])
+                    print(f"After first move: {new_revealed_count} revealed cells")
+
+                    if new_revealed_count == 0:
+                        print("First move didn't reveal anything, trying another location...")
+                        # Try a different first move location
+                        alternative_moves = [(width//4, height//4), (3*width//4, height//4),
+                                           (width//4, 3*height//4), (3*width//4, 3*height//4)]
+                        for alt_x, alt_y in alternative_moves:
+                            if self._is_valid_coordinate(alt_x, alt_y, width, height):
+                                print(f"Trying alternative first move: ({alt_x}, {alt_y})")
+                                if self.click_cell(alt_x, alt_y, right_click=False):
+                                    time.sleep(delay * 2)
+                                    game_state = self.get_game_state()
+                                    new_revealed_count = sum(1 for row in game_state['board'] for cell in row if cell['type'] in ['revealed', 'empty'])
+                                    if new_revealed_count > 0:
+                                        print(f"Alternative move successful! {new_revealed_count} revealed cells")
+                                        break
 
         # Simple solving strategy: find revealed cells with numbers
         # and make safe moves based on basic logic
