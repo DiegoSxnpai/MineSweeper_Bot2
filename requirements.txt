@@ -1,0 +1,3 @@
+# Requirements for Screen-Based Minesweeper Solver
+# Install all required dependencies:
+pip install opencv-python easyocr pyautogui pillow numpy
