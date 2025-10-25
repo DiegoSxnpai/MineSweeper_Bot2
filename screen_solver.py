@@ -171,12 +171,12 @@ class ScreenMinesweeperSolver:
         thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
         edges = cv2.Canny(thresh, 50, 150)
 
-        # Find lines with more restrictive parameters
-        lines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=150,
-                               minLineLength=100, maxLineGap=5)
+        # Find lines with more restrictive parameters for Minesweeper grids
+        lines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=200,
+                               minLineLength=80, maxLineGap=3)
 
-        if lines is None or len(lines) < 4:
-            print("Not enough lines detected, trying fallback method...")
+        if lines is None or len(lines) < 8:
+            print("Not enough strong lines detected, trying fallback method...")
             return self._detect_grid_fallback(image)
 
         # Separate vertical and horizontal lines with better filtering
@@ -188,15 +188,15 @@ class ScreenMinesweeperSolver:
 
             # Calculate line properties
             length = np.sqrt((x2 - x1)**2 + (y2 - y1)**2)
-            if length < 50:  # Too short to be a grid line
+            if length < 60:  # Too short to be a grid line
                 continue
 
-            # Determine if horizontal or vertical
+            # Determine if horizontal or vertical with better logic
             if abs(x1 - x2) < abs(y1 - y2):  # More vertical change = horizontal line
-                if abs(y1 - y2) > 30:  # Must have significant vertical span
+                if abs(y1 - y2) > 40:  # Must have significant vertical span
                     horizontal_lines.append((y1 + y2) // 2)
             else:  # More horizontal change = vertical line
-                if abs(x1 - x2) > 30:  # Must have significant horizontal span
+                if abs(x1 - x2) > 40:  # Must have significant horizontal span
                     vertical_lines.append((x1 + x2) // 2)
 
         # Remove duplicates and sort
@@ -205,15 +205,15 @@ class ScreenMinesweeperSolver:
 
         print(f"Detected {len(vertical_lines)} vertical lines and {len(horizontal_lines)} horizontal lines")
 
-        if len(vertical_lines) < 3 or len(horizontal_lines) < 3:
+        if len(vertical_lines) < 4 or len(horizontal_lines) < 4:
             print("Not enough grid lines, trying fallback...")
             return self._detect_grid_fallback(image)
 
         # Filter lines to find evenly spaced grid lines
-        vertical_lines = self._filter_grid_lines(vertical_lines, min_spacing=15, max_spacing=50)
-        horizontal_lines = self._filter_grid_lines(horizontal_lines, min_spacing=15, max_spacing=50)
+        vertical_lines = self._filter_grid_lines(vertical_lines, min_spacing=18, max_spacing=35)
+        horizontal_lines = self._filter_grid_lines(horizontal_lines, min_spacing=18, max_spacing=35)
 
-        if len(vertical_lines) < 3 or len(horizontal_lines) < 3:
+        if len(vertical_lines) < 4 or len(horizontal_lines) < 4:
             return self._detect_grid_fallback(image)
 
         # Calculate cell size from the most common spacing
@@ -221,8 +221,8 @@ class ScreenMinesweeperSolver:
         h_spacings = [horizontal_lines[i+1] - horizontal_lines[i] for i in range(len(horizontal_lines)-1)]
 
         self.cell_size = min(
-            np.median(v_spacings) if v_spacings else 20,
-            np.median(h_spacings) if h_spacings else 20
+            np.median(v_spacings) if v_spacings else 25,
+            np.median(h_spacings) if h_spacings else 25
         )
 
         # Set grid offset to the first grid line position
@@ -420,25 +420,32 @@ class ScreenMinesweeperSolver:
         mean_brightness = np.mean(gray)
         std_dev = np.std(gray)
 
-        # Check brightness range - revealed cells are usually lighter
-        brightness_ok = 130 < mean_brightness < 240
+        # Check brightness range - revealed cells are usually lighter than hidden cells
+        brightness_ok = 140 < mean_brightness < 240
 
         # Check variation - revealed cells have lower variation (uniform background)
-        variation_ok = std_dev < 35
+        variation_ok = std_dev < 40
 
         # Check for number patterns using OCR confidence
         number, confidence = self._read_number(cell_image)
-        has_number = number > 0 and confidence > 0.3
+        has_number = number > 0 and confidence > 0.2  # Lower confidence threshold
 
         # Additional check: look for Minesweeper-specific patterns
         # Revealed cells often have a light gray background
-        light_pixels = np.sum(gray > 180)
+        light_pixels = np.sum(gray > 190)
         light_ratio = light_pixels / (gray.shape[0] * gray.shape[1])
 
-        background_ok = light_ratio > 0.6  # Mostly light background
+        background_ok = light_ratio > 0.5  # Mostly light background
 
-        # Cell is revealed if it has good background AND either low variation or a detected number
-        return brightness_ok and background_ok and (variation_ok or has_number)
+        # Cell is revealed if it meets brightness and background criteria
+        # AND either has low variation or a detected number
+        is_revealed = brightness_ok and background_ok and (variation_ok or has_number)
+
+        # Debug: print some info about difficult cells
+        if mean_brightness < 100 or mean_brightness > 250:
+            print(f"Cell brightness: {mean_brightness}, std: {std_dev}, light_ratio: {light_ratio}, has_number: {has_number}")
+
+        return is_revealed
 
     def _is_cell_flagged(self, cell_image: np.ndarray) -> bool:
         """Check if cell has a flag."""
