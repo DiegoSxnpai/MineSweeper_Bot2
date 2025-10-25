@@ -395,11 +395,11 @@ class ScreenMinesweeperSolver:
     def _analyze_cell(self, cell_image: np.ndarray) -> Dict[str, Any]:
         """Analyze a single cell to determine its content."""
         # First check if cell is flagged (red color)
-        if self._is_flagged(cell_image):
+        if self._is_cell_flagged(cell_image):
             return {'type': 'flag', 'number': -2, 'confidence': 0.9}
 
         # Check if cell contains a mine (black/dark with specific pattern)
-        if self._is_mine(cell_image):
+        if self._is_cell_mine(cell_image):
             return {'type': 'mine', 'number': -1, 'confidence': 0.9}
 
         # Check if cell is revealed (has number or is empty)
@@ -439,6 +439,27 @@ class ScreenMinesweeperSolver:
 
         # Cell is revealed if it has good background AND either low variation or a detected number
         return brightness_ok and background_ok and (variation_ok or has_number)
+
+    def _is_cell_flagged(self, cell_image: np.ndarray) -> bool:
+        """Check if cell has a flag."""
+        hsv = cv2.cvtColor(cell_image, cv2.COLOR_BGR2HSV)
+
+        # Red color range for flags
+        lower_red = np.array([0, 120, 120])
+        upper_red = np.array([10, 255, 255])
+
+        red_mask = cv2.inRange(hsv, lower_red, upper_red)
+        red_ratio = cv2.countNonZero(red_mask) / (cell_image.shape[0] * cell_image.shape[1])
+
+        return red_ratio > 0.15
+
+    def _is_cell_mine(self, cell_image: np.ndarray) -> bool:
+        """Check if cell contains a mine."""
+        gray = cv2.cvtColor(cell_image, cv2.COLOR_BGR2GRAY)
+        mean_brightness = np.mean(gray)
+
+        # Mines are typically dark
+        return mean_brightness < 60
 
     def _read_number(self, cell_image: np.ndarray) -> Tuple[int, float]:
         """Read number from cell using OCR with better preprocessing."""
