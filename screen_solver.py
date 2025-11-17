@@ -360,6 +360,23 @@ class ScreenMinesweeperSolver:
                 print(f"Detected grid: {cols}x{rows}, cell size: {cell_size}px")
                 return cols, rows
 
+        # If bounds detection worked but no good fit found, use the bounds directly
+        if grid_w > 100 and grid_h > 100:  # Reasonable grid size
+            print(f"Using detected bounds for grid: {grid_w}x{grid_h}")
+
+            # Estimate cell size based on typical proportions
+            # Try to find a reasonable cell size that gives a good grid
+            for cell_size in range(20, 35, 2):
+                cols = grid_w // cell_size
+                rows = grid_h // cell_size
+
+                if 8 <= cols <= 30 and 8 <= rows <= 24:
+                    self.cell_size = cell_size
+                    self.grid_offset = (grid_x, grid_y)
+
+                    print(f"Using grid bounds: {cols}x{rows}, cell size: {cell_size}px")
+                    return cols, rows
+
         # Last resort: assume standard Minesweeper sizes
         print("Using default 16x16 grid")
         self.cell_size = 20
@@ -488,24 +505,25 @@ class ScreenMinesweeperSolver:
         std_dev = np.std(gray)
 
         # Check brightness range - revealed cells are usually lighter than hidden cells
-        brightness_ok = 140 < mean_brightness < 240
+        # Make range more permissive
+        brightness_ok = 100 < mean_brightness < 250
 
         # Check variation - revealed cells have lower variation (uniform background)
-        variation_ok = std_dev < 40
+        # Make threshold less strict
+        variation_ok = std_dev < 50
 
         # Check for number patterns using OCR confidence
         number, confidence = self._read_number(cell_image)
-        has_number = number > 0 and confidence > 0.2  # Lower confidence threshold
+        has_number = number > 0 and confidence > 0.1  # Much lower confidence threshold
 
         # Additional check: look for Minesweeper-specific patterns
         # Revealed cells often have a light gray background
-        light_pixels = np.sum(gray > 190)
+        light_pixels = np.sum(gray > 150)  # Lower threshold
         light_ratio = light_pixels / (gray.shape[0] * gray.shape[1])
 
-        background_ok = light_ratio > 0.5  # Mostly light background
+        background_ok = light_ratio > 0.3  # Lower threshold for light background
 
-        # Cell is revealed if it meets brightness and background criteria
-        # AND either has low variation or a detected number
+        # Cell is revealed if it meets basic criteria
         is_revealed = brightness_ok and background_ok and (variation_ok or has_number)
 
         # Debug: print some info about difficult cells
@@ -797,6 +815,7 @@ class ScreenMinesweeperSolver:
         """Find an obvious safe move."""
         width, height = game_state['width'], game_state['height']
 
+        # First, look for cells with 0 (empty cells) - these are always safe
         for y in range(height):
             for x in range(width):
                 cell = game_state['board'][y][x]
@@ -812,7 +831,42 @@ class ScreenMinesweeperSolver:
                                 game_state['board'][ny][nx]['type'] == 'hidden'):
                                 return (nx, ny)
 
-        return None
+        # If no obvious safe moves, look for cells adjacent to revealed empty areas
+        # These are often safe too
+        for y in range(height):
+            for x in range(width):
+                cell = game_state['board'][y][x]
+
+                if cell['type'] == 'revealed' and cell['number'] > 0:
+                    # Check if all mines around this cell are already flagged
+                    flagged_neighbors = 0
+                    hidden_neighbors = 0
+
+                    for dy in [-1, 0, 1]:
+                        for dx in [-1, 0, 1]:
+                            if dx == 0 and dy == 0:
+                                continue
+                            nx, ny = x + dx, y + dy
+                            if (0 <= nx < width and 0 <= ny < height):
+                                neighbor = game_state['board'][ny][nx]
+                                if neighbor['type'] == 'flag':
+                                    flagged_neighbors += 1
+                                elif neighbor['type'] == 'hidden':
+                                    hidden_neighbors += 1
+
+                    # If all mines are flagged, remaining hidden cells are safe
+                    if flagged_neighbors == cell['number'] and hidden_neighbors > 0:
+                        for dy in [-1, 0, 1]:
+                            for dx in [-1, 0, 1]:
+                                if dx == 0 and dy == 0:
+                                    continue
+                                nx, ny = x + dx, y + dy
+                                if (0 <= nx < width and 0 <= ny < height and
+                                    game_state['board'][ny][nx]['type'] == 'hidden'):
+                                    return (nx, ny)
+
+        # If still no safe moves, try educated guessing
+        return self._make_educated_guess(game_state)
 
     def _find_mine_move(self, game_state: Dict) -> Optional[Tuple[int, int]]:
         """Find an obvious mine to flag."""
